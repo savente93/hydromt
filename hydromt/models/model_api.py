@@ -330,7 +330,9 @@ class Model(object, metaclass=ABCMeta):
         self,
         region: dict,
         hydrography_fn: str = "merit_hydro",
+        subbasin_fn: str = None,
         basin_index_fn: str = "merit_hydro_index",
+        method: str = "pixel",
     ) -> dict:
         """Set the `region` of interest of the model.
 
@@ -355,11 +357,44 @@ class Model(object, metaclass=ABCMeta):
             see :py:function:~hydromt.workflows.basin_mask.parse_region
         hydrography_fn : str
             Name of data source for hydrography data.
-            FIXME describe data requirements
+
+            * Required variables: ['flwdir']
+
+            * Optional variable if basin_index_fn is provided: ['basins']
+
+            * Variables used for snapping in `region` (e.g. 'uparea', 'strord', etc.)
+
+        subbasin_fn : str, optional
+            Name of data source for subbasin data. Required if `region` is based on
+            'subbasin', 'basin' and method is either 'vector' or 'mixed'. GeoDataFrame
+            with shape of subbasins, ID of the next downstream subbasin `subbasins_down`
+            and optionnally ID of the main basin `basins` for faster delineation.
+
+            * Required variables: ['subbasins_down']
+
+            * Optional variables: ['basins']
+
         basin_index_fn : str
             Name of data source with basin (bounding box) geometries associated with
             the 'basins' layer of `hydrography_fn`. Only required if the `region` is
-            based on a (sub)(inter)basins without a 'bounds' argument.
+            based on a (sub)(inter)basins without a 'bounds' argument and `method` is
+            `pixel`.
+        method : str
+            Method to use to delineate basin or subbasin boundaries:
+
+            * 'pixel': delineate basin/subbasin boundaries based on pixel values from
+                `hydrography_fn`. This is the default method. `basin_index_fn` can be
+                used to load only a small extent of the hydrography data if `bounds` are
+                not provided to speed up the calculations.
+            * 'vector': delineate basin/subbasin boundaries based on vector geometries
+                from `subbasin_fn`. Finds to which basin/subbasin the point belongs to
+                and in case of subbasin, gets all the upstream basins to produce the
+                final shape. This method is faster than 'pixel' but less accurate.
+            * 'mixed': same as vector but for the subbasin in which the point is
+                located, 'hydrography_fn' is used to get the final delineation within
+                the most downstream subbasin. Note that the underlying data source of
+                `hydrography_fn` should be the same as `subbasin_fn` for this method to
+                yield correct results.
 
         Returns
         -------
@@ -382,13 +417,24 @@ class Model(object, metaclass=ABCMeta):
                     stacklevel=2,
                 )
             # retrieve global hydrography data (lazy!)
-            ds_org = self.data_catalog.get_rasterdataset(hydrography_fn)
-            if "bounds" not in region:
+            if method in ["pixel", "mixed"]:
+                ds_org = self.data_catalog.get_rasterdataset(hydrography_fn)
+            else:
+                ds_org = None
+            # retrieve subbasin data source (will be loaded later)
+            if method in ["vector", "mixed"]:
+                subbasins = self.data_catalog.get_source(subbasin_fn)
+            else:
+                subbasins = None
+            # Get basin index file for bounds selection with pixel method
+            if "bounds" not in region and method == "pixel":
                 region.update(basin_index=self.data_catalog.get_source(basin_index_fn))
             # get basin geometry
             geom, xy = workflows.get_basin_geometry(
                 ds=ds_org,
+                subbasins=subbasins,
                 kind=kind,
+                method=method,
                 logger=self.logger,
                 **region,
             )

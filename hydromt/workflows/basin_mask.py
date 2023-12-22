@@ -8,6 +8,7 @@ import logging
 import warnings
 from os.path import isdir, isfile
 from pathlib import Path
+from typing import List, Tuple, Union
 
 import geopandas as gpd
 import numpy as np
@@ -231,20 +232,22 @@ def _check_size(ds, logger=logger, threshold=12e3**2):
 
 
 def get_basin_geometry(
-    ds,
-    basin_index=None,
-    kind="basin",
-    bounds=None,
-    bbox=None,
-    geom=None,
-    xy=None,
-    basid=None,
-    outlets=False,
-    basins_name="basins",
-    flwdir_name="flwdir",
-    ftype="infer",
+    ds: xr.Dataset,
+    subbasins: Union[gpd.GeoDataFrame, GeoDataFrameAdapter] = None,
+    basin_index: Union[gpd.GeoDataFrame, GeoDataFrameAdapter] = None,
+    kind: str = "basin",
+    method: str = "pixel",
+    bounds: List[Union[float, int]] = None,
+    bbox: List[Union[float, int]] = None,
+    geom: gpd.GeoDataFrame = None,
+    xy: Tuple[float] = None,
+    basid: Union[int, List[int]] = None,
+    outlets: bool = False,
+    basins_name: str = "basins",
+    flwdir_name: str = "flwdir",
+    ftype: str = "infer",
     logger=logger,
-    buffer=10,
+    buffer: int = 10,
     **stream_kwargs,
 ):
     """Return a geometry of the (sub)(inter)basin(s).
@@ -260,11 +263,38 @@ def get_basin_geometry(
     ----------
     ds : xarray.Dataset
         dataset containing basin and flow direction variables
+    subbasins : geopandas.GeoDataFrame or GeoDataFrameAdapter
+        Name of data source for subbasin data. Required if `region` is based on
+        'subbasin', 'basin' and method is either 'vector' or 'mixed'. GeoDataFrame
+        with shape of subbasins, ID of the next downstream subbasin `subbasins_down`
+        and optionnally ID of the main basin `basins` for faster delineation.
+
+        * Required variables: ['subbasins_down']
+
+        * Optional variables: ['basins']
+
     basin_index: geopandas.GeoDataFrame or GeoDataFrameAdapter
         Dataframe with basin geomtries or bounding boxes with "basid" column
         corresponding to the ``ds[<basins_name>]`` map.
     kind : {"basin", "subbasin", "interbasin"}
         kind of basin description
+    method : str
+        Method to use to delineate basin or subbasin boundaries:
+
+        * 'pixel': delineate basin/subbasin boundaries based on pixel values from
+            `ds`. This is the default method. `basin_index_fn` can be
+            used to load only a small extent of the hydrography data if `bounds` are
+            not provided to speed up the calculations.
+        * 'vector': delineate basin/subbasin boundaries based on vector geometries
+            from `subbasins`. Finds to which basin/subbasin the point belongs to
+            and in case of subbasin, gets all the upstream basins to produce the
+            final shape. This method is faster than 'pixel' but less accurate.
+        * 'mixed': same as vector but for the subbasin in which the point is
+            located, 'ds' is used to get the final delineation within
+            the most downstream subbasin. Note that the underlying data source of
+            `ds` should be the same as `subbasins` for this method to
+            yield correct results.
+
     bounds: array_like of float, optional
         [xmin, ymin, xmax, ymax] coordinates of total bounding box, i.e. the data is
         clipped to this domain before futher processing.
@@ -318,23 +348,95 @@ def get_basin_geometry(
             stacklevel=2,
         )
 
-    # check variables
-    dvars = [flwdir_name] + [v for v in stream_kwargs]
-    for name in dvars:
-        if name not in ds.data_vars:
-            raise ValueError(f"Dataset variable {name} not in ds.")
+    # Check for method and data requirements
+    if method != "vector" and ds is None:
+        raise ValueError(f"ds is required for method {method}.")
+    if kind != "interbasin" and method != "pixel" and subbasins is None:
+        raise ValueError(f"subbasins is required for method {method}.")
+
+    # check variables in ds
+    if method in ["pixel", "mixed"] or kind == "interbasin":
+        dvars = [flwdir_name] + [v for v in stream_kwargs]
+        for name in dvars:
+            if name not in ds.data_vars:
+                raise ValueError(f"Dataset variable {name} not in ds.")
 
     # for interbasins we can limit the domain based on either bbox / geom or bounds
     if kind == "interbasin" and bounds is None:
         if bbox is None and geom is None:
             raise ValueError('"kind=interbasin" requires either "bbox" or "geom"')
         bounds = bbox if bbox is not None else geom.total_bounds
-    # initial clip based on bounds
-    if bounds is not None:
-        ds = ds.raster.clip_bbox(bounds, buffer=buffer)
+
     # convert bbox to geom
     if geom is None and bbox is not None:
         geom = gpd.GeoDataFrame(geometry=[box(*bbox)], crs=ds.raster.crs)
+
+    # Interbasin or pixel method
+    if kind == "interbasin" or method == "pixel":
+        basin_geom, outlet_geom = _get_basin_geometry_pixel(
+            ds=ds,
+            kind=kind,
+            basin_index=basin_index,
+            bounds=bounds,
+            geom=geom,
+            xy=xy,
+            basid=basid,
+            outlets=outlets,
+            buffer=buffer,
+            basins_name=basins_name,
+            flwdir_name=flwdir_name,
+            ftype=ftype,
+            logger=logger,
+            **stream_kwargs,
+        )
+    # Vector and mixed method
+    else:
+        basin_geom, outlet_geom = _get_basin_geometry_vector(
+            subbasins=subbasins,
+            kind=kind,
+            method=method,
+            ds=ds,
+            geom=geom,
+            xy=xy,
+            basid=basid,
+            outlets=outlets,
+            buffer=buffer,
+            flwdir_name=flwdir_name,
+            ftype=ftype,
+            logger=logger,
+            **stream_kwargs,
+        )
+
+    return basin_geom, outlet_geom
+
+
+def _get_basin_geometry_pixel(
+    ds: xr.Dataset,
+    kind: str = "basin",
+    basin_index: Union[gpd.GeoDataFrame, GeoDataFrameAdapter] = None,
+    bounds: List[Union[float, int]] = None,
+    geom: gpd.GeoDataFrame = None,
+    xy: Tuple[float] = None,
+    basid: Union[int, List[int]] = None,
+    outlets: bool = False,
+    buffer: int = 10,
+    basins_name: str = "basins",
+    flwdir_name: str = "flwdir",
+    ftype: str = "infer",
+    logger=logger,
+    **stream_kwargs,
+):
+    """
+    Return a geometry of the (sub)(inter)basin(s) using pixel method.
+
+    For a detailed description see:
+    :py:func:`~hydromt.workflows.basin_mask.get_basin_geometry`
+    """
+    # initial clip based on bounds
+    if bounds is not None:
+        ds = ds.raster.clip_bbox(bounds, buffer=buffer)
+
+    dvars = [flwdir_name] + [v for v in stream_kwargs]
 
     # check basin index
     # TODO understand pfafstetter codes
@@ -510,3 +612,61 @@ def get_basin_geometry(
         outlet_geom = gpd.GeoDataFrame(geometry=points, crs=ds.raster.crs)
 
     return basin_geom, outlet_geom
+
+
+def _get_basin_geometry_vector(
+    subbasins: Union[gpd.GeoDataFrame, GeoDataFrameAdapter],
+    kind: str = "basin",
+    method: "str" = "vector",
+    ds: xr.Dataset = None,
+    geom: gpd.GeoDataFrame = None,
+    xy: Tuple[float] = None,
+    basid: Union[int, List[int]] = None,
+    outlets: bool = False,
+    buffer: int = 10,
+    flwdir_name: str = "flwdir",
+    ftype: str = "infer",
+    logger=logger,
+    **stream_kwargs,
+):
+    """
+    Return a geometry of the (sub)basin(s) using vector or mixed methods.
+
+    For a detailed description see:
+    :py:func:`~hydromt.workflows.basin_mask.get_basin_geometry`
+    """
+    # 1. read a small set of subbasins first to find the IDS
+    if isinstance(subbasins, GeoDataFrameAdapter):
+        kwargs = dict(predicate="intersects")  # variables=["subbasins_down"])
+        if geom is not None:
+            kwargs.update(geom=geom)
+        elif xy is not None:
+            xy0 = np.atleast_1d(xy[0])
+            xy1 = np.atleast_1d(xy[1])
+            kwargs.update(
+                bbox=[
+                    min(xy0) - buffer / 2,
+                    min(xy1) - buffer / 2,
+                    max(xy0) + buffer / 2,
+                    max(xy1) + buffer / 2,
+                ]
+            )
+        subbasins = subbasins.get_data(**kwargs)
+    elif isinstance(subbasins, gpd.GeoDataFrame):
+        if "subbasins_down" not in subbasins.columns:
+            raise ValueError(
+                "Subbasin geometries does not have 'subbasins_down' column."
+            )
+
+    # 2. get subbasin ID from xy/geom/basid/outlets
+
+    # 3. Read required columns as pandas dataframe instead of geodataframe
+
+    # 3. if basin and basins in subbasins, direct filter
+
+    # 4. else find upstream subbasins and for basin the downstream ones as well
+
+    # 5. if method is mixed and subbasin, split the most dowsntream subbasin(s)
+    # use the snapping options in stream_kwargs
+
+    # 6. get geometries of all subbasins (read as geodataframe) and merge
