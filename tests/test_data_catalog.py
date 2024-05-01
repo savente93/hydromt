@@ -28,6 +28,7 @@ from hydromt.data_catalog import (
 from hydromt.data_source import GeoDataFrameSource
 from hydromt.gis.utils import to_geographic_bbox
 
+TEST_CATALOGS = Path(__file__).parent / "data" / "data_catalog"
 CATALOGDIR = join(dirname(abspath(__file__)), "..", "data", "catalogs")
 DATADIR = join(dirname(abspath(__file__)), "data")
 
@@ -539,34 +540,41 @@ def test_export_dataframe(tmpdir, df, df_time):
         assert isinstance(obj, dtypes), key
 
 
-@pytest.mark.skip(reason="needs implementation of all data types.")
-def test_get_rasterdataset():
-    data_catalog = DataCatalog("artifact_data")  # read artifacts
-    n = len(data_catalog)
-    # raster dataset using three different ways
-    name = "koppen_geiger"
-    da = data_catalog.get_rasterdataset(data_catalog.get_source(name).path)
-    assert len(data_catalog) == n + 1
-    assert isinstance(da, xr.DataArray)
-    da = data_catalog.get_rasterdataset(name, provider="artifact_data")
-    assert isinstance(da, xr.DataArray)
-    bbox = [12.0, 46.0, 13.0, 46.5]
-    da = data_catalog.get_rasterdataset(da, bbox=bbox)
-    assert isinstance(da, xr.DataArray)
-    assert np.allclose(da.raster.bounds, bbox)
-    data = {"source": name, "provider": "artifact_data"}
-    ds = data_catalog.get_rasterdataset(data, single_var_as_array=False)
-    assert isinstance(ds, xr.Dataset)
-    data = r"s3://copernicus-dem-30m/Copernicus_DSM_COG_10_N29_00_E105_00_DEM/Copernicus_DSM_COG_10_N29_00_E105_00_DEM.tif"
-    da = data_catalog.get_rasterdataset(data)
-    assert isinstance(da, xr.DataArray)
-    assert len(data_catalog) == n + 2
-    with pytest.raises(ValueError, match='Unknown raster data type "list"'):
-        data_catalog.get_rasterdataset([])
-    with pytest.raises(FileNotFoundError):
-        data_catalog.get_rasterdataset("test1.tif")
-    with pytest.raises(ValueError, match="Unknown keys in requested data"):
-        data_catalog.get_rasterdataset({"name": "test"})
+class TestGetRasterDataset:
+    @pytest.mark.integration()
+    def test_get_rasterdataset(self):
+        data_catalog: DataCatalog = DataCatalog().from_yml(
+            TEST_CATALOGS / "koppen_geiger.yml"
+        )
+        n = len(data_catalog)
+        # raster dataset using three different ways
+        name = "koppen_geiger"
+        da = data_catalog.get_rasterdataset(
+            data_catalog.get_source(name).uri,
+            driver=data_catalog.get_source(name).driver,
+        )
+        # TODO continue from here once we have fixed data catalog trouble from main.
+        assert len(data_catalog) == n + 1
+        assert isinstance(da, xr.DataArray)
+        da = data_catalog.get_rasterdataset(name, provider="artifact_data")
+        assert isinstance(da, xr.DataArray)
+        bbox = [12.0, 46.0, 13.0, 46.5]
+        da = data_catalog.get_rasterdataset(da, bbox=bbox)
+        assert isinstance(da, xr.DataArray)
+        assert np.allclose(da.raster.bounds, bbox)
+        data = {"source": name, "provider": "artifact_data"}
+        ds = data_catalog.get_rasterdataset(data, single_var_as_array=False)
+        assert isinstance(ds, xr.Dataset)
+        data = r"s3://copernicus-dem-30m/Copernicus_DSM_COG_10_N29_00_E105_00_DEM/Copernicus_DSM_COG_10_N29_00_E105_00_DEM.tif"
+        da = data_catalog.get_rasterdataset(data)
+        assert isinstance(da, xr.DataArray)
+        assert len(data_catalog) == n + 2
+        with pytest.raises(ValueError, match='Unknown raster data type "list"'):
+            data_catalog.get_rasterdataset([])
+        with pytest.raises(FileNotFoundError):
+            data_catalog.get_rasterdataset("test1.tif")
+        with pytest.raises(ValueError, match="Unknown keys in requested data"):
+            data_catalog.get_rasterdataset({"name": "test"})
 
 
 @pytest.mark.skip(reason="needs implementation of all data types.")
@@ -575,7 +583,7 @@ def test_get_geodataframe():
     n = len(data_catalog)
     # vector dataset using three different ways
     name = "osm_coastlines"
-    gdf = data_catalog.get_geodataframe(data_catalog.get_source(name).path)
+    gdf = data_catalog.get_geodataframe(data_catalog.get_source(name).uri)
     assert len(data_catalog) == n + 1
     assert isinstance(gdf, gpd.GeoDataFrame)
     gdf = data_catalog.get_geodataframe(name, provider="artifact_data")

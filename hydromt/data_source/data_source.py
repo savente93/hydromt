@@ -12,8 +12,12 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
+    WrapValidator,
     model_validator,
 )
+from typing_extensions import Annotated
 
 from hydromt._typing import DataType
 from hydromt.data_adapter.caching import _uri_validator
@@ -23,6 +27,18 @@ from hydromt.drivers import BaseDriver
 logger: Logger = getLogger(__name__)
 
 T = TypeVar("T")
+
+
+def _also_accept_str(
+    data: Any, handler: ValidatorFunctionWrapHandler, info: ValidationInfo
+):
+    if isinstance(data, int) or isinstance(data, float):
+        return handler(str(data))
+    else:
+        return handler(data)
+
+
+MetaDataVersion = Annotated[str, WrapValidator(_also_accept_str)]
 
 
 class SourceMetadata(BaseModel):
@@ -46,7 +62,7 @@ class SourceMetadata(BaseModel):
     author: Optional[str] = None
     license: Optional[str] = None
     url: Optional[str] = None
-    version: Optional[str] = None
+    version: Optional[MetaDataVersion] = None
     notes: Optional[str] = None
 
 

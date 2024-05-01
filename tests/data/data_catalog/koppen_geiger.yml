@@ -1,0 +1,13 @@
+koppen_geiger:
+  data_type: RasterDataset
+  driver:
+    name: raster_xarray
+  metadata:
+    category: meteo
+    paper_doi: 10.1127/0941-2948/2006/0130
+    paper_ref: Kottek et al. (2006)
+    url: http://koeppen-geiger.vu-wien.ac.at/present.htm
+    version: 2017
+    nodata: 0
+    crs: 4326
+  uri: koppen_geiger.tif

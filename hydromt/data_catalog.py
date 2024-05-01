@@ -46,7 +46,11 @@ from hydromt.data_adapter import (
     RasterDatasetAdapter,
 )
 from hydromt.data_adapter.caching import HYDROMT_DATADIR, _copyfile
-from hydromt.data_source import DataSource, create_source
+from hydromt.data_source import (
+    DataSource,
+    RasterDatasetSource,
+    create_source,
+)
 from hydromt.io.readers import _yml_from_uri_or_path
 
 logger = logging.getLogger(__name__)
@@ -71,7 +75,7 @@ class DataCatalog(object):
         cache: Optional[bool] = False,
         cache_dir: Optional[str] = None,
     ) -> None:
-        """Catalog of DataAdapter sources.
+        """Catalog of DataSources.
 
         Helps to easily read from different files and keep track of
         files which have been accessed.
@@ -105,7 +109,9 @@ class DataCatalog(object):
 
         data_libs = cast(list, data_libs)
 
-        self._sources = {}  # dictionary of DataAdapter
+        self._sources: Dict[
+            str, Dict[str, Dict[str, DataSource]]
+        ] = {}  # dictionary of DataSource names -> provider -> version
         self._predefined_catalogs = {}  # dictionary of predefined Catalogs
         self.root = None
         self._fallback_lib = fallback_lib
@@ -237,7 +243,7 @@ class DataCatalog(object):
         version: Optional[str] = None,
         detect: bool = True,
         strict: bool = False,
-    ) -> Optional[Tuple[Tuple[float, float, float, float], int]]:
+    ) -> Optional[Tuple[Bbox, int]]:
         """Retrieve the bounding box and crs of the source.
 
         Parameters
@@ -392,44 +398,36 @@ class DataCatalog(object):
 
         return self._sources[source][requested_provider][requested_version]
 
-    def add_source(self, source: str, adapter: DataAdapter) -> None:
+    def add_source(self, source: DataSource) -> None:
         """Add a new data source to the data catalog.
 
-        The data version and provider are extracted from the DataAdapter object.
+        The data version and provider are extracted from the DataSource object.
 
         Parameters
         ----------
-        source : str
-            Name of the data source.
-        adapter : DataAdapter
-            DataAdapter object.
+        source : DataSource
+            DataSource object.
         """
-        if not isinstance(adapter, DataAdapter):
-            raise ValueError("Value must be DataAdapter")
+        # make default version appear first using underscores.
+        version = source.version or "_UNSPECIFIED_"
+        provider = source.provider or "local"
 
-        if hasattr(adapter, "version") and adapter.version is not None:
-            version = adapter.version
-        else:
-            version = "_UNSPECIFIED_"  # make sure this comes first in sorted list
-
-        if hasattr(adapter, "provider") and adapter.provider is not None:
-            provider = adapter.provider
-        else:
-            provider = adapter.catalog_name
-
-        if source not in self._sources:
-            self._sources[source] = {}
-        else:  # check if data type is the same as adapter with same name
-            adapter0 = next(iter(next(iter(self._sources[source].values())).values()))
-            if adapter0.data_type != adapter.data_type:
+        # initialize structure
+        if source.name not in self._sources:
+            self._sources[source.name] = {}
+        else:  # check if data type is the same as source with same name
+            source0: DataSource = next(
+                iter(next(iter(self._sources[source.name].values())).values())
+            )
+            if source0.data_type != source.data_type:
                 raise ValueError(
-                    f"Data source '{source}' already exists with data type "
-                    f"'{adapter0.data_type}' but new data source has data type "
-                    f"'{adapter.data_type}'."
+                    f"Data source '{source.name}' already exists with data type "
+                    f"'{source0.data_type}' but new data source has data type "
+                    f"'{source.data_type}'."
                 )
 
-        if provider not in self._sources[source]:
-            versions = {version: adapter}
+        if provider not in self._sources[source.name]:
+            versions = {version: source}
         else:
             versions = self._sources[source][provider]
             if provider in self._sources[source] and version in versions:
@@ -440,10 +438,10 @@ class DataCatalog(object):
                     stacklevel=2,
                 )
             # update and sort dictionary -> make sure newest version is last
-            versions.update({version: adapter})
+            versions.update({version: source})
             versions = {k: versions[k] for k in sorted(list(versions.keys()))}
 
-        self._sources[source][provider] = versions
+        self._sources[source.name][provider] = versions
 
     def iter_sources(self, used_only=False) -> List[Tuple[str, DataAdapter]]:
         """Return a flat list of all available data sources.
@@ -829,23 +827,30 @@ class DataCatalog(object):
         Examples
         --------
         A data dictionary with two entries is provided below, where all the text between
-        <> should be filled by the user. See the specific data adapters
+        <> should be filled by the user. See the specific data sources.
         for more information about the required and optional arguments.
 
         .. code-block:: text
 
             {
                 <name1>: {
-                    "path": <path>,
+                    "uri": <uri>,
                     "data_type": <data_type>,
-                    "driver": <driver>,
-                    "filesystem": <filesystem>,
-                    "driver_kwargs": {<key>: <value>},
-                    "nodata": <nodata>,
-                    "rename": {<native_variable_name1>: <hydromt_variable_name1>},
-                    "unit_add": {<hydromt_variable_name1>: <float/int>},
-                    "unit_mult": {<hydromt_variable_name1>: <float/int>},
-                    "meta": {...},
+                    "driver": {
+                        "name: <name>,
+                        "metadata_resolver": <metadata_resolver>,
+                        "filesystem": <filesystem>,
+                        "options": {<options>},
+                    },
+                    "metadata": {
+                        "nodata": <nodata>,
+                        "crs": <crs>,
+                    },
+                    "data_adapter": {
+                        "rename": {<native_variable_name1>: <hydromt_variable_name1>},
+                        "unit_add": {<hydromt_variable_name1>: <float/int>},
+                        "unit_mult": {<hydromt_variable_name1>: <float/int>},
+                    },
                     "placeholders": {<placeholder_name_1>: <list of names>},
                 }
                 <name2>: {
@@ -884,20 +889,20 @@ class DataCatalog(object):
 
             # save catalog to cache
             with open(join(self.root, f"{catalog_name}.yml"), "w") as f:
-                d = {"meta": {k: v for k, v in meta.items() if k != "roots"}}
+                d = {"metdata": {k: v for k, v in meta.items() if k != "roots"}}
                 d.update(data_dict)
                 yaml.dump(d, f, default_flow_style=False, sort_keys=False)
 
         for name, source_dict in _denormalise_data_dict(data_dict):
-            adapter = _parse_data_source_dict(
+            source: DataSource = _parse_data_source_dict(
                 name,
                 source_dict,
                 root=root,
                 category=category,
             )
             if mark_used:
-                adapter.mark_as_used()
-            self.add_source(name, adapter)
+                source._used = True
+            self.add_source(source)
 
         return self
 
@@ -1197,12 +1202,12 @@ class DataCatalog(object):
         self,
         data_like: Union[str, SourceSpecDict, Path, xr.Dataset, xr.DataArray],
         bbox: Optional[List] = None,
-        geom: Optional[gpd.GeoDataFrame] = None,
+        mask: Union[gpd.GeoDataFrame, gpd.GeoSeries, None] = None,
         zoom_level: Optional[Union[int, tuple]] = None,
         buffer: Union[float, int] = 0,
         handle_nodata: NoDataStrategy = NoDataStrategy.RAISE,
         variables: Optional[Union[List, str]] = None,
-        time_tuple: Optional[Tuple] = None,
+        time_range: Optional[TimeRange] = None,
         single_var_as_array: Optional[bool] = True,
         provider: Optional[str] = None,
         version: Optional[str] = None,
@@ -1231,8 +1236,8 @@ class DataCatalog(object):
         bbox : array-like of floats
             (xmin, ymin, xmax, ymax) bounding box of area of interest
             (in WGS84 coordinates).
-        geom : geopandas.GeoDataFrame/Series,
-            A geometry defining the area of interest.
+        mask: geopandas.GeoDataFrame/Series,
+            A geometry defining the mask for the area of interest.
         zoom_level : int, tuple, optional
             Zoom level of the xyz tile dataset (0 is base level)
             Using a tuple the zoom level can be specified as
@@ -1244,7 +1249,7 @@ class DataCatalog(object):
         variables : str or list of str, optional.
             Names of RasterDataset variables to return. By default all dataset variables
             are returned.
-        time_tuple : tuple of str, datetime, optional
+        time_range: tuple of str, datetime, optional
             Start and end date of period of interest. By default the entire time period
             of the dataset is returned.
         single_var_as_array: bool, optional
@@ -1276,18 +1281,18 @@ class DataCatalog(object):
                 source = self.get_source(name, provider=provider, version=version)
             else:
                 if "provider" not in kwargs:
-                    kwargs.update({"provider": "user"})
-                source = RasterDatasetAdapter(path=str(data_like), **kwargs)
+                    kwargs.update({"provider": "user", "name": "_USER_DEFINED_"})
+                source = RasterDatasetSource(uri=str(data_like), **kwargs)
                 name = basename(data_like)
-                self.add_source(name, source)
+                self.add_source(source)
         elif isinstance(data_like, (xr.DataArray, xr.Dataset)):
             data_like = RasterDatasetAdapter._slice_data(
                 data_like,
                 variables,
-                geom,
+                mask,
                 bbox,
                 buffer,
-                time_tuple,
+                time_range,
                 logger=self.logger,
             )
             if data_like is None:
@@ -1303,15 +1308,14 @@ class DataCatalog(object):
         else:
             raise ValueError(f'Unknown raster data type "{type(data_like).__name__}"')
 
-        obj = source.get_data(
+        obj = source.read_data(
             bbox=bbox,
-            geom=geom,
+            mask=mask,
             buffer=buffer,
             zoom_level=zoom_level,
             variables=variables,
-            time_tuple=time_tuple,
-            single_var_as_array=single_var_as_array,
-            cache_root=self._cache_dir if self.cache else None,
+            time_range=time_range,
+            # cache_root=self._cache_dir if self.cache else None,
             handle_nodata=handle_nodata,
             logger=self.logger,
         )
@@ -1774,21 +1778,7 @@ def _denormalise_data_dict(data_dict) -> List[Tuple[str, Dict]]:
     for name, source in data_dict.items():
         source = copy.deepcopy(source)
         data_dicts = []
-        if "alias" in source:
-            alias = source.pop("alias")
-            warnings.warn(
-                "The use of alias is deprecated, please add a version on the aliased"
-                "catalog instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            if alias not in data_dict:
-                raise ValueError(f"alias {alias} not found in data_dict.")
-            # use alias source but overwrite any attributes with original source
-            source_copy = data_dict[alias].copy()
-            source_copy.update(source)
-            data_dicts.append({name: source_copy})
-        elif "variants" in source:
+        if "variants" in source:
             variants = source.pop("variants")
             for diff in variants:
                 source_copy = copy.deepcopy(source)
