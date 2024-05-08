@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # this is the default location of the predefined catalogs
 # in the test environment this is set to local data/catalogs directory using a global fixture
-GIT_ROOT = r"https://github.com/savente93/hydromt/blob/main/data/catalogs"
+GIT_ROOT = r"https://raw.githubusercontent.com/savente93/hydromt/main/data/catalogs"
 
 __all__ = [
     "PredefinedCatalog",
@@ -115,7 +115,7 @@ class PredefinedCatalog(object):
             retry_if_failed=3,
         )
 
-    def _set_versions(self) -> list[str]:
+    def _get_versions(self) -> list[str]:
         """Set valid catalog versions."""
         # parse versions from registry, assume registry key is <version>/data_catalog.yml
         # keep only versions that match the format_version
