@@ -105,7 +105,7 @@ class PredefinedCatalog(object):
     def versions(self) -> list[str]:
         """Return the versions of the catalog."""
         if not self._versions:
-            self._versions = self._set_versions()
+            self._versions = self._get_versions()
         return self._versions
 
     def _create_pooch(self) -> None:
